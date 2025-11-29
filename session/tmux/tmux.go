@@ -89,12 +89,15 @@ func newTmuxSession(name string, program string, ptyFactory PtyFactory, cmdExec 
 // Start creates and starts a new tmux session, then attaches to it. Program is the command to run in
 // the session (ex. claude). workdir is the git worktree directory.
 func (t *TmuxSession) Start(workDir string) error {
+	totalStart := time.Now()
+
 	// Check if the session already exists
 	if t.DoesSessionExist() {
 		return fmt.Errorf("tmux session already exists: %s", t.sanitizedName)
 	}
 
 	// Create a new detached tmux session and start claude in it
+	stageStart := time.Now()
 	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, t.program)
 
 	ptmx, err := t.ptyFactory.Start(cmd)
@@ -108,8 +111,12 @@ func (t *TmuxSession) Start(workDir string) error {
 		}
 		return fmt.Errorf("error starting tmux session: %w", err)
 	}
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[tmux timing] Created tmux session: %v", time.Since(stageStart))
+	}
 
 	// Poll for session existence with exponential backoff
+	stageStart = time.Now()
 	timeout := time.After(2 * time.Second)
 	sleepDuration := 5 * time.Millisecond
 	for !t.DoesSessionExist() {
@@ -128,8 +135,12 @@ func (t *TmuxSession) Start(workDir string) error {
 		}
 	}
 	ptmx.Close()
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[tmux timing] Session exists check: %v", time.Since(stageStart))
+	}
 
 	// Set history limit to enable scrollback (default is 2000, we'll use 10000 for more history)
+	stageStart = time.Now()
 	historyCmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, "history-limit", "10000")
 	if err := t.cmdExec.Run(historyCmd); err != nil {
 		log.InfoLog.Printf("Warning: failed to set history-limit for session %s: %v", t.sanitizedName, err)
@@ -140,7 +151,11 @@ func (t *TmuxSession) Start(workDir string) error {
 	if err := t.cmdExec.Run(mouseCmd); err != nil {
 		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
 	}
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[tmux timing] Set tmux options: %v", time.Since(stageStart))
+	}
 
+	stageStart = time.Now()
 	err = t.Restore()
 	if err != nil {
 		if cleanupErr := t.Close(); cleanupErr != nil {
@@ -148,44 +163,70 @@ func (t *TmuxSession) Start(workDir string) error {
 		}
 		return fmt.Errorf("error restoring tmux session: %w", err)
 	}
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[tmux timing] Restore PTY: %v", time.Since(stageStart))
+	}
+
+	stageStart = time.Now()
 
 	if strings.HasSuffix(t.program, ProgramClaude) || strings.HasSuffix(t.program, ProgramAider) || strings.HasSuffix(t.program, ProgramGemini) {
-		searchString := "Do you trust the files in this folder?"
+		// Trust screen handling - check for trust prompt and auto-accept if found
+		// If no trust prompt appears within a short window, assume already trusted
+		trustString := "Do you trust the files in this folder?"
+		readyIndicator := ">" // Claude shows ">" prompt when ready
 		tapFunc := t.TapEnter
-		maxWaitTime := 30 * time.Second // Much longer timeout for slower systems
+		maxWaitTime := 5 * time.Second // Only wait 5 seconds for trust screen
 		if !strings.HasSuffix(t.program, ProgramClaude) {
-			searchString = "Open documentation url for more info"
+			trustString = "Open documentation url for more info"
+			readyIndicator = ">" // Aider also uses ">" prompt
 			tapFunc = t.TapDAndEnter
-			maxWaitTime = 45 * time.Second // Aider/Gemini take longer to start
+			maxWaitTime = 10 * time.Second // Aider/Gemini might be slower
 		}
 
-		// Deal with "do you trust the files" screen by sending an enter keystroke.
-		// Use exponential backoff with longer timeout for reliability on slow systems
+		// Quick poll for trust screen - if it doesn't appear quickly, it's likely already trusted
 		startTime := time.Now()
-		sleepDuration := 100 * time.Millisecond
+		sleepDuration := 50 * time.Millisecond
 		attempt := 0
+		foundTrust := false
 
 		for time.Since(startTime) < maxWaitTime {
 			attempt++
-			time.Sleep(sleepDuration)
 			content, err := t.CapturePaneContent()
-			if err != nil {
-				// Session might not be ready yet, continue waiting
-			} else {
-				if strings.Contains(content, searchString) {
+			if err == nil {
+				// Check for trust screen
+				if strings.Contains(content, trustString) {
+					if log.InfoLog != nil {
+						log.InfoLog.Printf("Trust screen found after %v (attempt %d)", time.Since(startTime), attempt)
+					}
 					if err := tapFunc(); err != nil {
 						log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
+					}
+					foundTrust = true
+					break
+				}
+				// Check if Claude is already ready (has prompt, no trust screen)
+				// Look for the prompt indicator and ensure it's not empty/loading
+				if len(strings.TrimSpace(content)) > 10 && strings.Contains(content, readyIndicator) && !strings.Contains(content, trustString) {
+					if log.InfoLog != nil {
+						log.InfoLog.Printf("Agent ready (no trust screen) after %v (attempt %d)", time.Since(startTime), attempt)
 					}
 					break
 				}
 			}
 
-			// Exponential backoff with cap at 1 second
-			sleepDuration = time.Duration(float64(sleepDuration) * 1.2)
-			if sleepDuration > time.Second {
-				sleepDuration = time.Second
+			time.Sleep(sleepDuration)
+			// Exponential backoff with cap at 200ms for faster response
+			sleepDuration = time.Duration(float64(sleepDuration) * 1.3)
+			if sleepDuration > 200*time.Millisecond {
+				sleepDuration = 200 * time.Millisecond
 			}
 		}
+		if log.InfoLog != nil {
+			log.InfoLog.Printf("[tmux timing] Trust screen wait: %v (foundTrust=%v)", time.Since(stageStart), foundTrust)
+		}
+	}
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[tmux timing] TOTAL tmux Start(): %v", time.Since(totalStart))
 	}
 	return nil
 }

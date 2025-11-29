@@ -274,6 +274,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 // This method should be called from a goroutine to avoid blocking.
 func (i *Instance) StartWithProgress(firstTimeSetup bool, progress chan<- InitProgress) {
 	defer close(progress)
+	totalStart := time.Now()
 
 	if i.Title == "" {
 		progress <- InitProgress{Stage: StageFailed, Error: fmt.Errorf("instance title cannot be empty")}
@@ -303,6 +304,7 @@ func (i *Instance) StartWithProgress(firstTimeSetup bool, progress chan<- InitPr
 
 	if firstTimeSetup {
 		// Stage 1: Creating git worktree
+		stageStart := time.Now()
 		progress <- InitProgress{Stage: StageCreatingWorktree, Message: "Creating git worktree..."}
 
 		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
@@ -317,9 +319,13 @@ func (i *Instance) StartWithProgress(firstTimeSetup bool, progress chan<- InitPr
 			handleError(fmt.Errorf("failed to setup git worktree: %w", err), true)
 			return
 		}
+		if log.InfoLog != nil {
+			log.InfoLog.Printf("[instance timing] Git worktree setup: %v", time.Since(stageStart))
+		}
 	}
 
 	// Stage 2: Starting tmux session
+	stageStart := time.Now()
 	progress <- InitProgress{Stage: StageStartingTmux, Message: "Starting tmux session..."}
 
 	if !firstTimeSetup {
@@ -333,6 +339,9 @@ func (i *Instance) StartWithProgress(firstTimeSetup bool, progress chan<- InitPr
 			return
 		}
 	}
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[instance timing] Tmux session start: %v", time.Since(stageStart))
+	}
 
 	// Stage 3: Waiting for agent
 	progress <- InitProgress{Stage: StageWaitingForAgent, Message: "Waiting for agent..."}
@@ -341,6 +350,10 @@ func (i *Instance) StartWithProgress(firstTimeSetup bool, progress chan<- InitPr
 	// so by this point the agent should be ready
 	i.started = true
 	i.SetStatus(Running)
+
+	if log.InfoLog != nil {
+		log.InfoLog.Printf("[instance timing] TOTAL StartWithProgress: %v", time.Since(totalStart))
+	}
 
 	// Stage 4: Complete
 	progress <- InitProgress{Stage: StageComplete, Message: "Ready"}
