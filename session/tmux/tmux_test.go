@@ -72,8 +72,11 @@ func TestStartTmuxSession(t *testing.T) {
 	err := session.Start(workdir)
 	require.NoError(t, err)
 	require.Equal(t, 2, len(ptyFactory.cmds))
-	require.Equal(t, fmt.Sprintf("tmux new-session -d -s claudesquad_test-session -c %s claude", workdir),
-		cmd2.ToString(ptyFactory.cmds[0]))
+	// The shell used depends on SHELL env var, so just check the essential parts
+	cmdStr := cmd2.ToString(ptyFactory.cmds[0])
+	require.Contains(t, cmdStr, "tmux new-session -d -s claudesquad_test-session")
+	require.Contains(t, cmdStr, fmt.Sprintf("-c %s", workdir))
+	require.Contains(t, cmdStr, "-i -c exec claude")
 	require.Equal(t, "tmux attach-session -t claudesquad_test-session",
 		cmd2.ToString(ptyFactory.cmds[1]))
 

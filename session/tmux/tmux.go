@@ -96,9 +96,16 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("tmux session already exists: %s", t.sanitizedName)
 	}
 
-	// Create a new detached tmux session and start claude in it
+	// Create a new detached tmux session and start the program in it
+	// Use interactive shell (-i) to ensure aliases like 'claude' are available
+	// Use user's default shell from SHELL env var, fallback to bash
 	stageStart := time.Now()
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, t.program)
+	userShell := os.Getenv("SHELL")
+	if userShell == "" {
+		userShell = "bash"
+	}
+	shellCmd := fmt.Sprintf("exec %s", t.program)
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, userShell, "-i", "-c", shellCmd)
 
 	ptmx, err := t.ptyFactory.Start(cmd)
 	if err != nil {
@@ -143,13 +150,20 @@ func (t *TmuxSession) Start(workDir string) error {
 	stageStart = time.Now()
 	historyCmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, "history-limit", "10000")
 	if err := t.cmdExec.Run(historyCmd); err != nil {
-		log.InfoLog.Printf("Warning: failed to set history-limit for session %s: %v", t.sanitizedName, err)
+		if log.InfoLog != nil {
+			// Check if session still exists
+			exists := t.DoesSessionExist()
+			log.InfoLog.Printf("Warning: failed to set history-limit for session %s: %v (session exists: %v)", t.sanitizedName, err, exists)
+		}
 	}
 
 	// Enable mouse scrolling for the session
 	mouseCmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, "mouse", "on")
 	if err := t.cmdExec.Run(mouseCmd); err != nil {
-		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
+		if log.InfoLog != nil {
+			exists := t.DoesSessionExist()
+			log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v (session exists: %v)", t.sanitizedName, err, exists)
+		}
 	}
 	if log.InfoLog != nil {
 		log.InfoLog.Printf("[tmux timing] Set tmux options: %v", time.Since(stageStart))
@@ -169,56 +183,47 @@ func (t *TmuxSession) Start(workDir string) error {
 
 	stageStart = time.Now()
 
-	if strings.HasSuffix(t.program, ProgramClaude) || strings.HasSuffix(t.program, ProgramAider) || strings.HasSuffix(t.program, ProgramGemini) {
+	// Check if program contains known agent names (handles flags like "claude --dangerously-skip-permissions")
+	isClaude := strings.Contains(t.program, ProgramClaude)
+	isAider := strings.Contains(t.program, ProgramAider)
+	isGemini := strings.Contains(t.program, ProgramGemini)
+
+	if isClaude || isAider || isGemini {
 		// Trust screen handling - check for trust prompt and auto-accept if found
-		// If no trust prompt appears within a short window, assume already trusted
+		// Only wait briefly - the async UI lets users see and handle any prompts
+		// Note: --dangerously-skip-permissions skips the trust screen entirely
 		trustString := "Do you trust the files in this folder?"
-		readyIndicator := ">" // Claude shows ">" prompt when ready
 		tapFunc := t.TapEnter
-		maxWaitTime := 5 * time.Second // Only wait 5 seconds for trust screen
-		if !strings.HasSuffix(t.program, ProgramClaude) {
+		maxWaitTime := 2 * time.Second // Quick check for trust screen
+		if !isClaude {
 			trustString = "Open documentation url for more info"
-			readyIndicator = ">" // Aider also uses ">" prompt
 			tapFunc = t.TapDAndEnter
-			maxWaitTime = 10 * time.Second // Aider/Gemini might be slower
+			maxWaitTime = 3 * time.Second // Aider/Gemini might be slower
 		}
 
-		// Quick poll for trust screen - if it doesn't appear quickly, it's likely already trusted
+		// Quick poll for trust screen - if found, auto-accept it
+		// If not found quickly, continue anyway - user can handle it via the preview
 		startTime := time.Now()
 		sleepDuration := 50 * time.Millisecond
-		attempt := 0
 		foundTrust := false
 
 		for time.Since(startTime) < maxWaitTime {
-			attempt++
 			content, err := t.CapturePaneContent()
-			if err == nil {
-				// Check for trust screen
-				if strings.Contains(content, trustString) {
-					if log.InfoLog != nil {
-						log.InfoLog.Printf("Trust screen found after %v (attempt %d)", time.Since(startTime), attempt)
-					}
-					if err := tapFunc(); err != nil {
-						log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
-					}
-					foundTrust = true
-					break
+			if err == nil && strings.Contains(content, trustString) {
+				if log.InfoLog != nil {
+					log.InfoLog.Printf("Trust screen found after %v", time.Since(startTime))
 				}
-				// Check if Claude is already ready (has prompt, no trust screen)
-				// Look for the prompt indicator and ensure it's not empty/loading
-				if len(strings.TrimSpace(content)) > 10 && strings.Contains(content, readyIndicator) && !strings.Contains(content, trustString) {
-					if log.InfoLog != nil {
-						log.InfoLog.Printf("Agent ready (no trust screen) after %v (attempt %d)", time.Since(startTime), attempt)
-					}
-					break
+				if err := tapFunc(); err != nil {
+					log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
 				}
+				foundTrust = true
+				break
 			}
 
 			time.Sleep(sleepDuration)
-			// Exponential backoff with cap at 200ms for faster response
-			sleepDuration = time.Duration(float64(sleepDuration) * 1.3)
-			if sleepDuration > 200*time.Millisecond {
-				sleepDuration = 200 * time.Millisecond
+			// Quick backoff up to 150ms
+			if sleepDuration < 150*time.Millisecond {
+				sleepDuration = time.Duration(float64(sleepDuration) * 1.5)
 			}
 		}
 		if log.InfoLog != nil {
@@ -227,6 +232,23 @@ func (t *TmuxSession) Start(workDir string) error {
 	}
 	if log.InfoLog != nil {
 		log.InfoLog.Printf("[tmux timing] TOTAL tmux Start(): %v", time.Since(totalStart))
+		// Final check - is session actually alive?
+		exists := t.DoesSessionExist()
+		log.InfoLog.Printf("[tmux debug] Session alive at end of Start(): %v", exists)
+		if exists {
+			// Try to capture content to see what's in the pane
+			content, err := t.CapturePaneContent()
+			if err != nil {
+				log.InfoLog.Printf("[tmux debug] Failed to capture pane: %v", err)
+			} else {
+				// Log first 200 chars of content
+				preview := content
+				if len(preview) > 200 {
+					preview = preview[:200]
+				}
+				log.InfoLog.Printf("[tmux debug] Pane content preview: %q", preview)
+			}
+		}
 	}
 	return nil
 }
@@ -293,11 +315,12 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 	}
 
 	// Only set hasPrompt for claude and aider. Use these strings to check for a prompt.
-	if t.program == ProgramClaude {
+	// Use Contains to handle programs with flags like "claude --dangerously-skip-permissions"
+	if strings.Contains(t.program, ProgramClaude) {
 		hasPrompt = strings.Contains(content, "No, and tell Claude what to do differently")
-	} else if strings.HasPrefix(t.program, ProgramAider) {
+	} else if strings.Contains(t.program, ProgramAider) {
 		hasPrompt = strings.Contains(content, "(Y)es/(N)o/(D)on't ask again")
-	} else if strings.HasPrefix(t.program, ProgramGemini) {
+	} else if strings.Contains(t.program, ProgramGemini) {
 		hasPrompt = strings.Contains(content, "Yes, allow once")
 	}
 

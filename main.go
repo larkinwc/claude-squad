@@ -18,10 +18,11 @@ import (
 )
 
 var (
-	version     = "1.0.13"
-	programFlag string
-	autoYesFlag bool
-	daemonFlag  bool
+	version                       = "1.0.13"
+	programFlag                   string
+	autoYesFlag                   bool
+	daemonFlag                    bool
+	dangerouslySkipPermissionsFlag bool
 	rootCmd     = &cobra.Command{
 		Use:   "claude-squad",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
@@ -53,6 +54,10 @@ var (
 			program := cfg.DefaultProgram
 			if programFlag != "" {
 				program = programFlag
+			}
+			// Append --dangerously-skip-permissions if flag is set
+			if dangerouslySkipPermissionsFlag {
+				program = program + " --dangerously-skip-permissions"
 			}
 			// AutoYes flag overrides config
 			autoYes := cfg.AutoYes
@@ -148,6 +153,8 @@ func init() {
 		"Program to run in new instances (e.g. 'aider --model ollama_chat/gemma3:1b')")
 	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
 		"[experimental] If enabled, all instances will automatically accept prompts")
+	rootCmd.Flags().BoolVar(&dangerouslySkipPermissionsFlag, "dangerously-skip-permissions", false,
+		"Skip Claude's permission prompts (adds --dangerously-skip-permissions to claude)")
 	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run a program that loads all sessions"+
 		" and runs autoyes mode on them.")
 
