@@ -6,6 +6,7 @@ import (
 	"claude-squad/log"
 	"claude-squad/session"
 	"claude-squad/ui"
+	"claude-squad/ui/autocomplete"
 	"claude-squad/ui/overlay"
 	"context"
 	"fmt"
@@ -91,6 +92,14 @@ type home struct {
 	textOverlay *overlay.TextOverlay
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
+
+	// hotkeys maps number keys (1-9) to commands for quick send
+	hotkeys config.Hotkeys
+
+	// autocompleter provides command autocomplete for prompt input
+	autocompleter autocomplete.Autocompleter
+	// autocompleteInputOverlay handles text input with autocomplete support
+	autocompleteInputOverlay *overlay.AutocompleteInputOverlay
 }
 
 func newHome(ctx context.Context, program string, autoYes bool) *home {
@@ -121,6 +130,12 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 		appState:     appState,
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
+
+	// Load per-repo hotkeys
+	h.hotkeys = config.LoadHotkeys(".")
+
+	// Initialize autocompleter for Claude commands
+	h.autocompleter = autocomplete.NewClaudeCommandsAutocompleter(".")
 
 	// Load saved instances
 	instances, err := storage.LoadInstances()
@@ -158,6 +173,9 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 
 	if m.textInputOverlay != nil {
 		m.textInputOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.4))
+	}
+	if m.autocompleteInputOverlay != nil {
+		m.autocompleteInputOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.4))
 	}
 	if m.textOverlay != nil {
 		m.textOverlay.SetWidth(int(float32(msg.Width) * 0.6))
@@ -350,8 +368,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if m.promptAfterName {
 				m.state = statePrompt
 				m.menu.SetState(ui.StatePrompt)
-				// Initialize the text input overlay
-				m.textInputOverlay = overlay.NewTextInputOverlay("Enter prompt", "")
+				// Initialize the autocomplete input overlay
+				m.autocompleteInputOverlay = overlay.NewAutocompleteInputOverlay("Enter prompt", "", m.autocompleter)
 				m.promptAfterName = false
 			} else {
 				m.menu.SetState(ui.StateDefault)
@@ -393,8 +411,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 		return m, nil
 	} else if m.state == statePrompt {
-		// Use the new TextInputOverlay component to handle all key events
-		shouldClose := m.textInputOverlay.HandleKeyPress(msg)
+		// Use the AutocompleteInputOverlay component to handle all key events
+		shouldClose := m.autocompleteInputOverlay.HandleKeyPress(msg)
 
 		// Check if the form was submitted or canceled
 		if shouldClose {
@@ -403,15 +421,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if selected == nil {
 				return m, nil
 			}
-			if m.textInputOverlay.IsSubmitted() {
-				if err := selected.SendPrompt(m.textInputOverlay.GetValue()); err != nil {
+			if m.autocompleteInputOverlay.IsSubmitted() {
+				if err := selected.SendPrompt(m.autocompleteInputOverlay.GetValue()); err != nil {
 					// TODO: we probably end up in a bad state here.
 					return m, m.handleError(err)
 				}
 			}
 
 			// Close the overlay and reset state
-			m.textInputOverlay = nil
+			m.autocompleteInputOverlay = nil
 			m.state = stateDefault
 			return m, tea.Sequence(
 				tea.WindowSize(),
@@ -456,6 +474,20 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	// Handle quit commands first
 	if msg.String() == "ctrl+c" || msg.String() == "q" {
 		return m.handleQuit()
+	}
+
+	// Handle hotkey numbers 1-9 in stateDefault
+	keyStr := msg.String()
+	if len(keyStr) == 1 && keyStr[0] >= '1' && keyStr[0] <= '9' {
+		if command, ok := m.hotkeys[keyStr]; ok {
+			selected := m.list.GetSelectedInstance()
+			if selected != nil && !selected.Paused() && selected.Started() {
+				if err := selected.SendPrompt(command); err != nil {
+					return m, m.handleError(err)
+				}
+				return m, nil
+			}
+		}
 	}
 
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
@@ -732,10 +764,10 @@ func (m *home) View() string {
 	)
 
 	if m.state == statePrompt {
-		if m.textInputOverlay == nil {
-			log.ErrorLog.Printf("text input overlay is nil")
+		if m.autocompleteInputOverlay == nil {
+			log.ErrorLog.Printf("autocomplete input overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.textInputOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.autocompleteInputOverlay.Render(), mainView, true, true)
 	} else if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")

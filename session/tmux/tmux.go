@@ -246,7 +246,8 @@ func (t *TmuxSession) SendKeys(keys string) error {
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 	content, err := t.CapturePaneContent()
 	if err != nil {
-		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
+		// Don't log errors here - they're expected during session startup/shutdown
+		// and would spam the logs. The caller can handle errors appropriately.
 		return false, false
 	}
 
@@ -474,11 +475,17 @@ func (t *TmuxSession) DoesSessionExist() bool {
 
 // CapturePaneContent captures the content of the tmux pane
 func (t *TmuxSession) CapturePaneContent() (string, error) {
+	// First check if the session exists to avoid noisy errors during startup race conditions
+	if !t.DoesSessionExist() {
+		return "", fmt.Errorf("session does not exist: %s", t.sanitizedName)
+	}
+
 	// Add -e flag to preserve escape sequences (ANSI color codes)
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-t", t.sanitizedName)
-	output, err := t.cmdExec.Output(cmd)
+	output, err := t.cmdExec.CombinedOutput(cmd)
 	if err != nil {
-		return "", fmt.Errorf("error capturing pane content: %v", err)
+		// Include stderr in the error message for better debugging
+		return "", fmt.Errorf("error capturing pane content: %v, output: %s", err, string(output))
 	}
 	return string(output), nil
 }
@@ -486,11 +493,16 @@ func (t *TmuxSession) CapturePaneContent() (string, error) {
 // CapturePaneContentWithOptions captures the pane content with additional options
 // start and end specify the starting and ending line numbers (use "-" for the start/end of history)
 func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, error) {
+	// First check if the session exists to avoid noisy errors during startup race conditions
+	if !t.DoesSessionExist() {
+		return "", fmt.Errorf("session does not exist: %s", t.sanitizedName)
+	}
+
 	// Add -e flag to preserve escape sequences (ANSI color codes)
 	cmd := exec.Command("tmux", "capture-pane", "-p", "-e", "-J", "-S", start, "-E", end, "-t", t.sanitizedName)
-	output, err := t.cmdExec.Output(cmd)
+	output, err := t.cmdExec.CombinedOutput(cmd)
 	if err != nil {
-		return "", fmt.Errorf("failed to capture tmux pane content with options: %v", err)
+		return "", fmt.Errorf("failed to capture tmux pane content with options: %v, output: %s", err, string(output))
 	}
 	return string(output), nil
 }

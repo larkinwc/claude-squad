@@ -298,7 +298,14 @@ func (i *Instance) Preview() (string, error) {
 	if !i.started || i.Status == Paused {
 		return "", nil
 	}
-	return i.tmuxSession.CapturePaneContent()
+	content, err := i.tmuxSession.CapturePaneContent()
+	if err != nil {
+		// Return empty content instead of error during transient failures
+		// (e.g., session starting up, pane not ready yet). This prevents
+		// error spam in the logs during normal startup/shutdown transitions.
+		return "", nil
+	}
+	return content, nil
 }
 
 func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
@@ -537,7 +544,12 @@ func (i *Instance) PreviewFullHistory() (string, error) {
 	if !i.started || i.Status == Paused {
 		return "", nil
 	}
-	return i.tmuxSession.CapturePaneContentWithOptions("-", "-")
+	content, err := i.tmuxSession.CapturePaneContentWithOptions("-", "-")
+	if err != nil {
+		// Return empty content instead of error during transient failures
+		return "", nil
+	}
+	return content, nil
 }
 
 // SetTmuxSession sets the tmux session for testing purposes
