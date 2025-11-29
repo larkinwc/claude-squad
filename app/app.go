@@ -100,6 +100,9 @@ type home struct {
 	autocompleter autocomplete.Autocompleter
 	// autocompleteInputOverlay handles text input with autocomplete support
 	autocompleteInputOverlay *overlay.AutocompleteInputOverlay
+
+	// initProgressMessage stores the current progress message for initializing instance
+	initProgressMessage string
 }
 
 func newHome(ctx context.Context, program string, autoYes bool) *home {
@@ -266,6 +269,49 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case instanceChangedMsg:
 		// Handle instance changed after confirmation action
 		return m, m.instanceChanged()
+	case instanceProgressMsg:
+		// Update progress message and continue listening
+		m.initProgressMessage = msg.progress.Message
+		return m, listenForProgressCmd(msg.instance, msg.channel, msg.finalizer, msg.promptAfterName)
+	case instanceStartCompleteMsg:
+		// Clear progress message
+		m.initProgressMessage = ""
+
+		if msg.err != nil {
+			// Find and remove the failed instance
+			for i, inst := range m.list.GetInstances() {
+				if inst == msg.instance {
+					m.list.SetSelectedInstance(i)
+					m.list.Kill()
+					break
+				}
+			}
+			return m, m.handleError(msg.err)
+		}
+
+		// Save after adding new instance
+		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+			return m, m.handleError(err)
+		}
+
+		// Call finalizer if present
+		if msg.finalizer != nil {
+			msg.finalizer()
+		}
+		if m.autoYes {
+			msg.instance.AutoYes = true
+		}
+
+		// Handle prompt mode or help screen
+		if msg.promptAfterName {
+			m.state = statePrompt
+			m.menu.SetState(ui.StatePrompt)
+			m.autocompleteInputOverlay = overlay.NewAutocompleteInputOverlay("Enter prompt", "", m.autocompleter)
+		} else {
+			m.showHelpScreen(helpStart(msg.instance), nil)
+		}
+
+		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -342,41 +388,25 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 		instance := m.list.GetInstances()[m.list.NumInstances()-1]
 		switch msg.Type {
-		// Start the instance (enable previews etc) and go back to the main menu state.
+		// Start the instance asynchronously and go back to the main menu state.
 		case tea.KeyEnter:
 			if len(instance.Title) == 0 {
 				return m, m.handleError(fmt.Errorf("title cannot be empty"))
 			}
 
-			if err := instance.Start(true); err != nil {
-				m.list.Kill()
-				m.state = stateDefault
-				return m, m.handleError(err)
-			}
-			// Save after adding new instance
-			if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
-				return m, m.handleError(err)
-			}
-			// Instance added successfully, call the finalizer.
-			m.newInstanceFinalizer()
-			if m.autoYes {
-				instance.AutoYes = true
-			}
-
-			m.newInstanceFinalizer()
+			// Set loading state and transition UI immediately
+			instance.SetStatus(session.Loading)
 			m.state = stateDefault
-			if m.promptAfterName {
-				m.state = statePrompt
-				m.menu.SetState(ui.StatePrompt)
-				// Initialize the autocomplete input overlay
-				m.autocompleteInputOverlay = overlay.NewAutocompleteInputOverlay("Enter prompt", "", m.autocompleter)
-				m.promptAfterName = false
-			} else {
-				m.menu.SetState(ui.StateDefault)
-				m.showHelpScreen(helpStart(instance), nil)
-			}
+			m.menu.SetState(ui.StateDefault)
 
-			return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
+			// Capture state before clearing
+			finalizer := m.newInstanceFinalizer
+			promptAfterName := m.promptAfterName
+			m.promptAfterName = false
+			m.initProgressMessage = "Starting..."
+
+			// Start async initialization
+			return m, startInstanceCmd(instance, finalizer, promptAfterName)
 		case tea.KeyRunes:
 			if len(instance.Title) >= 32 {
 				return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
@@ -642,7 +672,7 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 		selected := m.list.GetSelectedInstance()
-		if selected == nil || selected.Paused() || !selected.TmuxAlive() {
+		if selected == nil || selected.Paused() || selected.Status == session.Loading || !selected.TmuxAlive() {
 			return m, nil
 		}
 		// Show help screen before attaching
@@ -704,6 +734,24 @@ type tickUpdateMetadataMessage struct{}
 
 type instanceChangedMsg struct{}
 
+// instanceProgressMsg is sent during async instance initialization to report progress
+type instanceProgressMsg struct {
+	instance *session.Instance
+	progress session.InitProgress
+	channel  <-chan session.InitProgress
+	// Captured state from when initialization started
+	finalizer       func()
+	promptAfterName bool
+}
+
+// instanceStartCompleteMsg signals that async instance initialization has completed
+type instanceStartCompleteMsg struct {
+	instance        *session.Instance
+	err             error
+	finalizer       func()
+	promptAfterName bool
+}
+
 // tickUpdateMetadataCmd is the callback to update the metadata of the instances every 500ms. Note that we iterate
 // overall the instances and capture their output. It's a pretty expensive operation. Let's do it 2x a second only.
 var tickUpdateMetadataCmd = func() tea.Msg {
@@ -723,6 +771,62 @@ func (m *home) handleError(err error) tea.Cmd {
 		}
 
 		return hideErrMsg{}
+	}
+}
+
+// startInstanceCmd starts instance initialization asynchronously and returns the first progress message
+func startInstanceCmd(instance *session.Instance, finalizer func(), promptAfterName bool) tea.Cmd {
+	return func() tea.Msg {
+		progress := make(chan session.InitProgress, 1)
+		go instance.StartWithProgress(true, progress)
+
+		// Wait for first progress message
+		p := <-progress
+		return instanceProgressMsg{
+			instance:        instance,
+			progress:        p,
+			channel:         progress,
+			finalizer:       finalizer,
+			promptAfterName: promptAfterName,
+		}
+	}
+}
+
+// listenForProgressCmd continues listening for progress updates from the channel
+func listenForProgressCmd(instance *session.Instance, ch <-chan session.InitProgress, finalizer func(), promptAfterName bool) tea.Cmd {
+	return func() tea.Msg {
+		p, ok := <-ch
+		if !ok {
+			// Channel closed, initialization complete
+			return instanceStartCompleteMsg{
+				instance:        instance,
+				finalizer:       finalizer,
+				promptAfterName: promptAfterName,
+			}
+		}
+
+		if p.Stage == session.StageComplete {
+			return instanceStartCompleteMsg{
+				instance:        instance,
+				finalizer:       finalizer,
+				promptAfterName: promptAfterName,
+			}
+		}
+
+		if p.Stage == session.StageFailed {
+			return instanceStartCompleteMsg{
+				instance: instance,
+				err:      p.Error,
+			}
+		}
+
+		return instanceProgressMsg{
+			instance:        instance,
+			progress:        p,
+			channel:         ch,
+			finalizer:       finalizer,
+			promptAfterName: promptAfterName,
+		}
 	}
 }
 
@@ -756,9 +860,19 @@ func (m *home) View() string {
 	previewWithPadding := lipgloss.NewStyle().PaddingTop(1).Render(m.tabbedWindow.String())
 	listAndPreview := lipgloss.JoinHorizontal(lipgloss.Top, listWithPadding, previewWithPadding)
 
+	// Show init progress message if present
+	var statusLine string
+	if m.initProgressMessage != "" {
+		statusStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888888")).
+			Italic(true)
+		statusLine = statusStyle.Render(fmt.Sprintf("  %s %s", m.spinner.View(), m.initProgressMessage))
+	}
+
 	mainView := lipgloss.JoinVertical(
 		lipgloss.Center,
 		listAndPreview,
+		statusLine,
 		m.menu.String(),
 		m.errBox.String(),
 	)

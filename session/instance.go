@@ -27,6 +27,24 @@ const (
 	Paused
 )
 
+// InitStage represents the current stage of instance initialization
+type InitStage int
+
+const (
+	StageCreatingWorktree InitStage = iota
+	StageStartingTmux
+	StageWaitingForAgent
+	StageComplete
+	StageFailed
+)
+
+// InitProgress represents progress information during instance initialization
+type InitProgress struct {
+	Stage   InitStage
+	Message string
+	Error   error
+}
+
 // Instance is a running instance of claude code.
 type Instance struct {
 	// Title is the title of the instance.
@@ -249,6 +267,83 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	i.SetStatus(Running)
 
 	return nil
+}
+
+// StartWithProgress starts the instance and reports progress via the provided channel.
+// The channel is closed when initialization completes (either successfully or with an error).
+// This method should be called from a goroutine to avoid blocking.
+func (i *Instance) StartWithProgress(firstTimeSetup bool, progress chan<- InitProgress) {
+	defer close(progress)
+
+	if i.Title == "" {
+		progress <- InitProgress{Stage: StageFailed, Error: fmt.Errorf("instance title cannot be empty")}
+		return
+	}
+
+	i.SetStatus(Loading)
+
+	var tmuxSession *tmux.TmuxSession
+	if i.tmuxSession != nil {
+		tmuxSession = i.tmuxSession
+	} else {
+		tmuxSession = tmux.NewTmuxSession(i.Title, i.Program)
+	}
+	i.tmuxSession = tmuxSession
+
+	// Helper to handle errors with cleanup
+	handleError := func(err error, cleanupWorktree bool) {
+		if cleanupWorktree && i.gitWorktree != nil {
+			if cleanupErr := i.gitWorktree.Cleanup(); cleanupErr != nil {
+				err = fmt.Errorf("%v (cleanup error: %v)", err, cleanupErr)
+			}
+		}
+		i.SetStatus(Ready) // Reset status on failure
+		progress <- InitProgress{Stage: StageFailed, Error: err}
+	}
+
+	if firstTimeSetup {
+		// Stage 1: Creating git worktree
+		progress <- InitProgress{Stage: StageCreatingWorktree, Message: "Creating git worktree..."}
+
+		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
+		if err != nil {
+			handleError(fmt.Errorf("failed to create git worktree: %w", err), false)
+			return
+		}
+		i.gitWorktree = gitWorktree
+		i.Branch = branchName
+
+		if err := i.gitWorktree.Setup(); err != nil {
+			handleError(fmt.Errorf("failed to setup git worktree: %w", err), true)
+			return
+		}
+	}
+
+	// Stage 2: Starting tmux session
+	progress <- InitProgress{Stage: StageStartingTmux, Message: "Starting tmux session..."}
+
+	if !firstTimeSetup {
+		if err := tmuxSession.Restore(); err != nil {
+			handleError(fmt.Errorf("failed to restore existing session: %w", err), false)
+			return
+		}
+	} else {
+		if err := i.tmuxSession.Start(i.gitWorktree.GetWorktreePath()); err != nil {
+			handleError(fmt.Errorf("failed to start new session: %w", err), true)
+			return
+		}
+	}
+
+	// Stage 3: Waiting for agent
+	progress <- InitProgress{Stage: StageWaitingForAgent, Message: "Waiting for agent..."}
+
+	// The tmux Start() method already waits for the trust screen,
+	// so by this point the agent should be ready
+	i.started = true
+	i.SetStatus(Running)
+
+	// Stage 4: Complete
+	progress <- InitProgress{Stage: StageComplete, Message: "Ready"}
 }
 
 // Kill terminates the instance and cleans up all resources

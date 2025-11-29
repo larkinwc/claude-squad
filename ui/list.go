@@ -125,10 +125,12 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		descS = listDescStyle
 	}
 
-	// add spinner next to title if it's running
+	// add spinner next to title if it's running or loading
 	var join string
 	switch i.Status {
 	case session.Running:
+		join = fmt.Sprintf("%s ", r.spinner.View())
+	case session.Loading:
 		join = fmt.Sprintf("%s ", r.spinner.View())
 	case session.Ready:
 		join = readyStyle.Render(readyIcon)
