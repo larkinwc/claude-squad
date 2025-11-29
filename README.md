@@ -4,6 +4,7 @@
 - Added timing status when creating new instance
 - Debug logs for timing (used to optimize for my use case)
 - Decreased timing/timeout for trust screen
+- Added --dangerously-skip-permissions flag
 
 # Claude Squad [![CI](https://github.com/smtg-ai/claude-squad/actions/workflows/build.yml/badge.svg)](https://github.com/smtg-ai/claude-squad/actions/workflows/build.yml) [![GitHub Release](https://img.shields.io/github/v/release/smtg-ai/claude-squad)](https://github.com/smtg-ai/claude-squad/releases/latest)
 
