@@ -65,9 +65,21 @@ func (a *AutocompleteInputOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		value := a.textarea.Value()
 
 		// If text starts with "/" and we're in the textarea, handle autocomplete
+		// But only if we're still typing the command (no space yet) or already showing suggestions
 		if a.FocusIndex == 0 && strings.HasPrefix(value, "/") {
-			if !a.showingSuggestions {
-				// Trigger autocomplete
+			hasSpace := strings.Contains(value, " ")
+
+			// If already showing suggestions, allow cycling through them
+			if a.showingSuggestions {
+				if len(a.suggestions) > 0 {
+					a.selectedIndex = (a.selectedIndex + 1) % len(a.suggestions)
+					a.applySuggestion()
+				}
+				return false
+			}
+
+			// Only trigger new autocomplete if we're still typing the command (no space)
+			if !hasSpace {
 				a.triggerAutocomplete()
 				if len(a.suggestions) > 0 {
 					a.applySuggestion()
@@ -75,12 +87,8 @@ func (a *AutocompleteInputOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 				return false
 			}
 
-			// Cycle through suggestions
-			if len(a.suggestions) > 0 {
-				a.selectedIndex = (a.selectedIndex + 1) % len(a.suggestions)
-				a.applySuggestion()
-			}
-			return false
+			// Command is complete (has space), Tab should be normal behavior
+			// Fall through to toggle focus or insert tab
 		}
 
 		// Normal tab behavior: toggle focus between input and enter button
@@ -113,15 +121,12 @@ func (a *AutocompleteInputOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		return true
 
 	case tea.KeyEnter:
-		if a.FocusIndex == 1 {
-			// Enter button is focused, so submit
-			a.Submitted = true
-			if a.OnSubmit != nil {
-				a.OnSubmit()
-			}
-			return true
+		// Enter always submits (use Shift+Enter for newline if needed)
+		a.Submitted = true
+		if a.OnSubmit != nil {
+			a.OnSubmit()
 		}
-		fallthrough // Send enter key to textarea
+		return true
 
 	default:
 		if a.FocusIndex == 0 {

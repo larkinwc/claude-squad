@@ -626,6 +626,45 @@ func (i *Instance) GetDiffStats() *git.DiffStats {
 	return i.diffStats
 }
 
+// WaitForInputReady waits for the program to be ready to accept input.
+// It polls the tmux pane content and waits until it stabilizes (stops changing).
+func (i *Instance) WaitForInputReady(timeout time.Duration) error {
+	if !i.started {
+		return fmt.Errorf("instance not started")
+	}
+	if i.tmuxSession == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+
+	startTime := time.Now()
+	pollInterval := 100 * time.Millisecond
+	stableThreshold := 500 * time.Millisecond // Content must be stable for this long
+	lastChangeTime := time.Now()
+	var lastContent string
+
+	for time.Since(startTime) < timeout {
+		content, err := i.tmuxSession.CapturePaneContent()
+		if err != nil {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		if content != lastContent {
+			lastContent = content
+			lastChangeTime = time.Now()
+		} else if time.Since(lastChangeTime) >= stableThreshold {
+			// Content has been stable for the threshold duration
+			return nil
+		}
+
+		time.Sleep(pollInterval)
+	}
+
+	// Timeout reached - return nil anyway to allow the prompt to be sent
+	// It's better to try than to block forever
+	return nil
+}
+
 // SendPrompt sends a prompt to the tmux session
 func (i *Instance) SendPrompt(prompt string) error {
 	if !i.started {

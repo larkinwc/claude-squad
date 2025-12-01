@@ -70,6 +70,8 @@ type home struct {
 
 	// promptAfterName tracks if we should enter prompt mode after naming
 	promptAfterName bool
+	// pendingPrompt stores a prompt submitted before instance finished initializing
+	pendingPrompt string
 
 	// keySent is used to manage underlining menu items
 	keySent bool
@@ -286,6 +288,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
+			// Clear pending prompt on error
+			m.pendingPrompt = ""
+			// Close prompt overlay if open
+			if m.state == statePrompt {
+				m.autocompleteInputOverlay = nil
+				m.state = stateDefault
+				m.menu.SetState(ui.StateDefault)
+			}
 			return m, m.handleError(msg.err)
 		}
 
@@ -302,8 +312,20 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.instance.AutoYes = true
 		}
 
-		// Handle prompt mode or help screen
-		if msg.promptAfterName {
+		// Send pending prompt if user submitted while instance was initializing
+		if m.pendingPrompt != "" {
+			prompt := m.pendingPrompt
+			m.pendingPrompt = ""
+			// Use async command to wait for input ready before sending
+			return m, tea.Batch(
+				tea.WindowSize(),
+				m.instanceChanged(),
+				sendPendingPromptCmd(msg.instance, prompt),
+			)
+		} else if m.state == statePrompt {
+			// Prompt overlay is still open, user is still typing - do nothing
+		} else if msg.promptAfterName {
+			// Legacy path (shouldn't happen with new flow)
 			m.state = statePrompt
 			m.menu.SetState(ui.StatePrompt)
 			m.autocompleteInputOverlay = overlay.NewAutocompleteInputOverlay("Enter prompt", "", m.autocompleter)
@@ -312,6 +334,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
+	case pendingPromptSentMsg:
+		if msg.err != nil {
+			return m, m.handleError(msg.err)
+		}
+		// Show help screen now that prompt has been sent
+		m.showHelpScreen(helpStart(msg.instance), nil)
+		return m, m.instanceChanged()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -394,19 +423,29 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return m, m.handleError(fmt.Errorf("title cannot be empty"))
 			}
 
-			// Set loading state and transition UI immediately
+			// Set loading state
 			instance.SetStatus(session.Loading)
-			m.state = stateDefault
-			m.menu.SetState(ui.StateDefault)
 
 			// Capture state before clearing
 			finalizer := m.newInstanceFinalizer
 			promptAfterName := m.promptAfterName
 			m.promptAfterName = false
+			m.pendingPrompt = ""
 			m.initProgressMessage = "Starting..."
 
-			// Start async initialization
-			return m, startInstanceCmd(instance, finalizer, promptAfterName)
+			// If prompt after name, show overlay immediately while instance initializes
+			if promptAfterName {
+				m.state = statePrompt
+				m.menu.SetState(ui.StatePrompt)
+				m.autocompleteInputOverlay = overlay.NewAutocompleteInputOverlay("Enter prompt", "", m.autocompleter)
+				// Start async initialization and trigger window resize to size the overlay
+				return m, tea.Batch(startInstanceCmd(instance, finalizer, false), tea.WindowSize())
+			}
+
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+			// Start async initialization (pass false for promptAfterName since we handle it above)
+			return m, startInstanceCmd(instance, finalizer, false)
 		case tea.KeyRunes:
 			if len(instance.Title) >= 32 {
 				return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
@@ -452,9 +491,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return m, nil
 			}
 			if m.autocompleteInputOverlay.IsSubmitted() {
-				if err := selected.SendPrompt(m.autocompleteInputOverlay.GetValue()); err != nil {
-					// TODO: we probably end up in a bad state here.
-					return m, m.handleError(err)
+				prompt := m.autocompleteInputOverlay.GetValue()
+				// Try to send prompt - if instance not ready yet, store as pending
+				if err := selected.SendPrompt(prompt); err != nil {
+					// Instance not ready yet, store prompt for later
+					m.pendingPrompt = prompt
 				}
 			}
 
@@ -465,7 +506,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				tea.WindowSize(),
 				func() tea.Msg {
 					m.menu.SetState(ui.StateDefault)
-					m.showHelpScreen(helpStart(selected), nil)
+					// Only show help screen if instance is ready (no pending prompt)
+					if m.pendingPrompt == "" {
+						m.showHelpScreen(helpStart(selected), nil)
+					}
 					return nil
 				},
 			)
@@ -750,6 +794,27 @@ type instanceStartCompleteMsg struct {
 	err             error
 	finalizer       func()
 	promptAfterName bool
+}
+
+// pendingPromptSentMsg signals that a pending prompt was sent after waiting for input ready
+type pendingPromptSentMsg struct {
+	instance *session.Instance
+	err      error
+}
+
+// sendPendingPromptCmd waits for the instance to be ready and sends the pending prompt
+func sendPendingPromptCmd(instance *session.Instance, prompt string) tea.Cmd {
+	return func() tea.Msg {
+		// Wait for the program to be ready to accept input (up to 5 seconds)
+		_ = instance.WaitForInputReady(5 * time.Second)
+
+		// Send the prompt
+		err := instance.SendPrompt(prompt)
+		return pendingPromptSentMsg{
+			instance: instance,
+			err:      err,
+		}
+	}
 }
 
 // tickUpdateMetadataCmd is the callback to update the metadata of the instances every 500ms. Note that we iterate
