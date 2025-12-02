@@ -628,6 +628,8 @@ func (i *Instance) GetDiffStats() *git.DiffStats {
 
 // WaitForInputReady waits for the program to be ready to accept input.
 // It polls the tmux pane content and waits until it stabilizes (stops changing).
+// The function requires seeing at least one content change before checking for stability,
+// ensuring the program has actually started producing output.
 func (i *Instance) WaitForInputReady(timeout time.Duration) error {
 	if !i.started {
 		return fmt.Errorf("instance not started")
@@ -638,9 +640,13 @@ func (i *Instance) WaitForInputReady(timeout time.Duration) error {
 
 	startTime := time.Now()
 	pollInterval := 100 * time.Millisecond
-	stableThreshold := 500 * time.Millisecond // Content must be stable for this long
-	lastChangeTime := time.Now()
+	stableThreshold := 1 * time.Second // Content must be stable for this long
+	minContentLength := 50             // Minimum content length to consider "started"
+
 	var lastContent string
+	var lastChangeTime time.Time
+	seenContentChange := false
+	seenSubstantialContent := false
 
 	for time.Since(startTime) < timeout {
 		content, err := i.tmuxSession.CapturePaneContent()
@@ -649,11 +655,20 @@ func (i *Instance) WaitForInputReady(timeout time.Duration) error {
 			continue
 		}
 
+		// Check if we have substantial content (program has started)
+		if len(content) >= minContentLength {
+			seenSubstantialContent = true
+		}
+
 		if content != lastContent {
+			if lastContent != "" {
+				seenContentChange = true
+			}
 			lastContent = content
 			lastChangeTime = time.Now()
-		} else if time.Since(lastChangeTime) >= stableThreshold {
+		} else if seenSubstantialContent && seenContentChange && time.Since(lastChangeTime) >= stableThreshold {
 			// Content has been stable for the threshold duration
+			// and we've seen the program produce output
 			return nil
 		}
 
