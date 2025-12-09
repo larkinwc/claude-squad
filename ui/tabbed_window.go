@@ -74,18 +74,23 @@ func AdjustPreviewWidth(width int) int {
 	return int(float64(width) * 0.9)
 }
 
+// tabHeight returns the height of the tab row including border and padding
+func (w *TabbedWindow) tabHeight() int {
+	return activeTabStyle.GetVerticalFrameSize() + 1
+}
+
+// contentDimensions returns the width and height available for content (preview/diff panes)
+func (w *TabbedWindow) contentDimensions() (width, height int) {
+	width = w.width - windowStyle.GetHorizontalFrameSize()
+	height = w.height - w.tabHeight() - windowStyle.GetVerticalFrameSize() - 2
+	return width, height
+}
+
 func (w *TabbedWindow) SetSize(width, height int) {
 	w.width = AdjustPreviewWidth(width)
 	w.height = height
 
-	// Calculate the content height by subtracting:
-	// 1. Tab height (including border and padding)
-	// 2. Window style vertical frame size
-	// 3. Additional padding/spacing (2 for the newline and spacing)
-	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1
-	contentHeight := height - tabHeight - windowStyle.GetVerticalFrameSize() - 2
-	contentWidth := w.width - windowStyle.GetHorizontalFrameSize()
-
+	contentWidth, contentHeight := w.contentDimensions()
 	w.preview.SetSize(contentWidth, contentHeight)
 	w.diff.SetSize(contentWidth, contentHeight)
 }
@@ -170,7 +175,6 @@ func (w *TabbedWindow) String() string {
 
 	tabWidth := w.width / len(w.tabs)
 	lastTabWidth := w.width - tabWidth*(len(w.tabs)-1)
-	tabHeight := activeTabStyle.GetVerticalFrameSize() + 1 // get padding border margin size + 1 for character height
 
 	for i, t := range w.tabs {
 		width := tabWidth
@@ -207,9 +211,10 @@ func (w *TabbedWindow) String() string {
 	} else {
 		content = w.diff.String()
 	}
+	_, contentHeight := w.contentDimensions()
 	window := windowStyle.Render(
 		lipgloss.Place(
-			w.width, w.height-2-windowStyle.GetVerticalFrameSize()-tabHeight,
+			w.width, contentHeight,
 			lipgloss.Left, lipgloss.Top, content))
 
 	return lipgloss.JoinVertical(lipgloss.Left, "\n", row, window)

@@ -1,0 +1,9 @@
+Features I would like to implement
+
+1. keybased hotkeys that send a specific command to the selected (hovered) agent, 
+e.g. pressing "1" when one agent is selected would send whatever we have configured in a per repo config, e.g. "/0-fix-issue"
+2. start session with command, that supports autocomplete similar to how claude code auto completes (read claude code custom commands to autocomplete), 
+use case is we can create a new session with /0-fix-issue 123. And we would type /0, tab complete the full command, then be able to add the arg we need
+
+
+Rename the project

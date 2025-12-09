@@ -156,23 +156,23 @@ func (p *PreviewPane) String() string {
 		return p.viewport.View()
 	}
 
-	// Normal mode display
-	// Calculate available height accounting for border and margin
-	availableHeight := p.height - 1 //  1 for ellipsis
+	// Normal mode display - show the last N lines (bottom of content)
+	// This ensures the view stays stable at the bottom where new output appears
+	availableHeight := p.height - 1 // Reserve 1 line for ellipsis indicator
 
 	lines := strings.Split(p.previewState.text, "\n")
 
-	// Truncate if we have more lines than available height
-	if availableHeight > 0 {
-		if len(lines) > availableHeight {
-			lines = lines[:availableHeight]
-			lines = append(lines, "...")
-		} else {
-			// Pad with empty lines to fill available height
-			padding := availableHeight - len(lines)
-			lines = append(lines, make([]string, padding)...)
-		}
+	// Show last N lines instead of first N - this prevents visual jitter
+	// when content length fluctuates during rapid updates
+	if availableHeight > 0 && len(lines) > availableHeight {
+		// Take the last availableHeight lines
+		startIdx := len(lines) - availableHeight
+		lines = lines[startIdx:]
+		// Prepend ellipsis to indicate truncated content above
+		lines = append([]string{"..."}, lines...)
 	}
+	// No padding needed - content naturally anchors to top, and we show
+	// the most recent output which is what users want to see
 
 	content := strings.Join(lines, "\n")
 	rendered := previewPaneStyle.Width(p.width).Render(content)
