@@ -18,12 +18,12 @@ import (
 )
 
 var (
-	version                       = "1.0.13"
-	programFlag                   string
-	autoYesFlag                   bool
-	daemonFlag                    bool
+	version                        = "1.0.13"
+	programFlag                    string
+	autoYesFlag                    bool
+	daemonFlag                     bool
 	dangerouslySkipPermissionsFlag bool
-	rootCmd     = &cobra.Command{
+	rootCmd                        = &cobra.Command{
 		Use:   "claude-squad",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
 		RunE: func(cmd *cobra.Command, args []string) error {

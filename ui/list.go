@@ -125,12 +125,14 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		descS = listDescStyle
 	}
 
-	// add spinner next to title if it's running or loading
+	// add spinner next to title if it's running, loading, or deleting
 	var join string
 	switch i.Status {
 	case session.Running:
 		join = fmt.Sprintf("%s ", r.spinner.View())
 	case session.Loading:
+		join = fmt.Sprintf("%s ", r.spinner.View())
+	case session.Deleting:
 		join = fmt.Sprintf("%s ", r.spinner.View())
 	case session.Ready:
 		join = readyStyle.Render(readyIcon)
@@ -271,7 +273,7 @@ func (l *List) Down() {
 	}
 }
 
-// Kill selects the next item in the list.
+// Kill removes the currently selected instance from the list and kills its tmux session.
 func (l *List) Kill() {
 	if len(l.items) == 0 {
 		return
@@ -298,6 +300,48 @@ func (l *List) Kill() {
 
 	// Since there's items after this, the selectedIdx can stay the same.
 	l.items = append(l.items[:l.selectedIdx], l.items[l.selectedIdx+1:]...)
+}
+
+// RemoveInstance removes a specific instance from the list (without killing it - assumes already killed).
+func (l *List) RemoveInstance(instance *session.Instance) {
+	if len(l.items) == 0 {
+		return
+	}
+
+	// Find the instance index
+	idx := -1
+	for i, item := range l.items {
+		if item == instance {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		log.ErrorLog.Printf("instance not found in list: %s", instance.Title)
+		return
+	}
+
+	// Unregister the reponame
+	repoName, err := instance.RepoName()
+	if err != nil {
+		log.ErrorLog.Printf("could not get repo name: %v", err)
+	} else {
+		l.rmRepo(repoName)
+	}
+
+	// If we're removing the selected instance or one before it, adjust selection
+	if idx <= l.selectedIdx && l.selectedIdx > 0 {
+		l.selectedIdx--
+	}
+
+	// Remove from list
+	l.items = append(l.items[:idx], l.items[idx+1:]...)
+
+	// Ensure selectedIdx is within bounds
+	if l.selectedIdx >= len(l.items) && len(l.items) > 0 {
+		l.selectedIdx = len(l.items) - 1
+	}
 }
 
 func (l *List) Attach() (chan struct{}, error) {

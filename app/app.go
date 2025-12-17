@@ -105,6 +105,9 @@ type home struct {
 
 	// initProgressMessage stores the current progress message for initializing instance
 	initProgressMessage string
+
+	// pendingKillInstance stores the instance pending deletion after confirmation
+	pendingKillInstance *session.Instance
 }
 
 func newHome(ctx context.Context, program string, autoYes bool) *home {
@@ -270,6 +273,18 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleError(msg)
 	case instanceChangedMsg:
 		// Handle instance changed after confirmation action
+		return m, m.instanceChanged()
+	case instanceDeletedMsg:
+		// Handle instance deletion completion
+		if msg.err != nil {
+			// Deletion failed - revert status and show error
+			if msg.instance != nil {
+				msg.instance.SetStatus(session.Ready)
+			}
+			return m, m.handleError(msg.err)
+		}
+		// Successfully deleted - remove from list
+		m.list.RemoveInstance(msg.instance)
 		return m, m.instanceChanged()
 	case instanceProgressMsg:
 		// Update progress message and continue listening
@@ -520,10 +535,39 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 	// Handle confirmation state
 	if m.state == stateConfirm {
-		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
-		if shouldClose {
+		keyStr := msg.String()
+		confirmed := keyStr == "y"
+		cancelled := keyStr == "n" || keyStr == "esc"
+
+		if confirmed || cancelled {
 			m.state = stateDefault
+			overlay := m.confirmationOverlay
 			m.confirmationOverlay = nil
+
+			// Handle kill confirmation (async)
+			if confirmed && m.pendingKillInstance != nil {
+				instance := m.pendingKillInstance
+				m.pendingKillInstance = nil
+
+				// Mark as deleting immediately so user sees feedback
+				instance.SetStatus(session.Deleting)
+
+				// Start async deletion
+				return m, deleteInstanceCmd(instance, m.storage)
+			}
+
+			// Clear pending instance on cancel
+			m.pendingKillInstance = nil
+
+			// Handle other confirmations via callbacks (e.g., push)
+			if overlay != nil {
+				if confirmed && overlay.OnConfirm != nil {
+					overlay.OnConfirm()
+				} else if cancelled && overlay.OnCancel != nil {
+					overlay.OnCancel()
+				}
+			}
+
 			return m, nil
 		}
 		return m, nil
@@ -635,36 +679,16 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 
-		// Create the kill action as a tea.Cmd
-		killAction := func() tea.Msg {
-			// Get worktree and check if branch is checked out
-			worktree, err := selected.GetGitWorktree()
-			if err != nil {
-				return err
-			}
-
-			checkedOut, err := worktree.IsBranchCheckedOut()
-			if err != nil {
-				return err
-			}
-
-			if checkedOut {
-				return fmt.Errorf("instance %s is currently checked out", selected.Title)
-			}
-
-			// Delete from storage first
-			if err := m.storage.DeleteInstance(selected.Title); err != nil {
-				return err
-			}
-
-			// Then kill the instance
-			m.list.Kill()
-			return instanceChangedMsg{}
-		}
+		// Store the instance for async deletion after confirmation
+		m.pendingKillInstance = selected
 
 		// Show confirmation modal
 		message := fmt.Sprintf("[!] Kill session '%s'?", selected.Title)
-		return m, m.confirmAction(message, killAction)
+		m.state = stateConfirm
+		m.confirmationOverlay = overlay.NewConfirmationOverlay(message)
+		m.confirmationOverlay.SetWidth(50)
+
+		return m, nil
 	case keys.KeySubmit:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil {
@@ -778,6 +802,12 @@ type tickUpdateMetadataMessage struct{}
 
 type instanceChangedMsg struct{}
 
+// instanceDeletedMsg signals that async instance deletion has completed
+type instanceDeletedMsg struct {
+	instance *session.Instance
+	err      error
+}
+
 // instanceProgressMsg is sent during async instance initialization to report progress
 type instanceProgressMsg struct {
 	instance *session.Instance
@@ -814,6 +844,41 @@ func sendPendingPromptCmd(instance *session.Instance, prompt string) tea.Cmd {
 			instance: instance,
 			err:      err,
 		}
+	}
+}
+
+// deleteInstanceCmd performs async instance deletion
+func deleteInstanceCmd(instance *session.Instance, storage *session.Storage) tea.Cmd {
+	return func() tea.Msg {
+		// Check if branch is checked out
+		worktree, err := instance.GetGitWorktree()
+		if err != nil {
+			return instanceDeletedMsg{instance: instance, err: err}
+		}
+
+		checkedOut, err := worktree.IsBranchCheckedOut()
+		if err != nil {
+			return instanceDeletedMsg{instance: instance, err: err}
+		}
+
+		if checkedOut {
+			return instanceDeletedMsg{
+				instance: instance,
+				err:      fmt.Errorf("instance %s is currently checked out", instance.Title),
+			}
+		}
+
+		// Delete from storage first
+		if err := storage.DeleteInstance(instance.Title); err != nil {
+			return instanceDeletedMsg{instance: instance, err: err}
+		}
+
+		// Then kill the instance (tmux session + git worktree cleanup)
+		if err := instance.Kill(); err != nil {
+			return instanceDeletedMsg{instance: instance, err: err}
+		}
+
+		return instanceDeletedMsg{instance: instance, err: nil}
 	}
 }
 

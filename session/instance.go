@@ -25,6 +25,8 @@ const (
 	Loading
 	// Paused is if the instance is paused (worktree removed but branch preserved).
 	Paused
+	// Deleting is if the instance is being deleted (worktree and branch being removed).
+	Deleting
 )
 
 // InitStage represents the current stage of instance initialization
