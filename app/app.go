@@ -850,34 +850,39 @@ func sendPendingPromptCmd(instance *session.Instance, prompt string) tea.Cmd {
 // deleteInstanceCmd performs async instance deletion
 func deleteInstanceCmd(instance *session.Instance, storage *session.Storage) tea.Cmd {
 	return func() tea.Msg {
-		// Check if branch is checked out
+		// Check if branch is checked out - this is a hard blocker
 		worktree, err := instance.GetGitWorktree()
-		if err != nil {
-			return instanceDeletedMsg{instance: instance, err: err}
-		}
-
-		checkedOut, err := worktree.IsBranchCheckedOut()
-		if err != nil {
-			return instanceDeletedMsg{instance: instance, err: err}
-		}
-
-		if checkedOut {
-			return instanceDeletedMsg{
-				instance: instance,
-				err:      fmt.Errorf("instance %s is currently checked out", instance.Title),
+		if err == nil {
+			// Only check if we could get the worktree
+			checkedOut, checkErr := worktree.IsBranchCheckedOut()
+			if checkErr == nil && checkedOut {
+				return instanceDeletedMsg{
+					instance: instance,
+					err:      fmt.Errorf("instance %s is currently checked out", instance.Title),
+				}
 			}
+			// If check failed, log but continue - resources may already be gone
+			if checkErr != nil {
+				log.WarningLog.Printf("could not check if branch is checked out: %v", checkErr)
+			}
+		} else {
+			// Couldn't get worktree - resources may already be gone, log and continue
+			log.WarningLog.Printf("could not get git worktree for deletion check: %v", err)
 		}
 
-		// Delete from storage first
+		// Delete from storage - this should always work
 		if err := storage.DeleteInstance(instance.Title); err != nil {
-			return instanceDeletedMsg{instance: instance, err: err}
+			// Storage deletion failed - this is unexpected, but try to continue
+			log.ErrorLog.Printf("failed to delete instance from storage: %v", err)
 		}
 
-		// Then kill the instance (tmux session + git worktree cleanup)
+		// Kill the instance (tmux session + git worktree cleanup)
+		// Log errors but don't fail - resources may already be cleaned up
 		if err := instance.Kill(); err != nil {
-			return instanceDeletedMsg{instance: instance, err: err}
+			log.WarningLog.Printf("cleanup errors during instance deletion (may be expected if resources already gone): %v", err)
 		}
 
+		// Always succeed - we've done our best to clean up
 		return instanceDeletedMsg{instance: instance, err: nil}
 	}
 }
